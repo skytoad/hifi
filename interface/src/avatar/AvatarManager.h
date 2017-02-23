@@ -41,7 +41,11 @@ public:
     void init();
 
     std::shared_ptr<MyAvatar> getMyAvatar() { return _myAvatar; }
-    AvatarSharedPointer getAvatarBySessionID(const QUuid& sessionID) override;
+    AvatarSharedPointer getAvatarBySessionID(const QUuid& sessionID) const override;
+
+    int getFullySimulatedAvatars() const { return _fullySimulatedAvatars; }
+    int getPartiallySimulatedAvatars() const { return _partiallySimulatedAvatars; }
+    float getAvatarSimulationTime() const { return _avatarSimulationTime; }
 
     void updateMyAvatar(float deltaTime);
     void updateOtherAvatars(float deltaTime);
@@ -69,10 +73,17 @@ public:
     void handleOutgoingChanges(const VectorOfMotionStates& motionStates);
     void handleCollisionEvents(const CollisionEvents& collisionEvents);
 
-    Q_INVOKABLE float getAvatarDataRate(const QUuid& sessionID, const QString& rateName = QString(""));
+    Q_INVOKABLE float getAvatarDataRate(const QUuid& sessionID, const QString& rateName = QString("")) const;
+    Q_INVOKABLE float getAvatarUpdateRate(const QUuid& sessionID, const QString& rateName = QString("")) const;
+    Q_INVOKABLE float getAvatarSimulationRate(const QUuid& sessionID, const QString& rateName = QString("")) const;
+
     Q_INVOKABLE RayToAvatarIntersectionResult findRayIntersection(const PickRay& ray,
                                                                   const QScriptValue& avatarIdsToInclude = QScriptValue(),
                                                                   const QScriptValue& avatarIdsToDiscard = QScriptValue());
+
+    // TODO: remove this HACK once we settle on optimal default sort coefficients
+    Q_INVOKABLE float getAvatarSortCoefficient(const QString& name);
+    Q_INVOKABLE void setAvatarSortCoefficient(const QString& name, const QScriptValue& value);
 
     float getMyAvatarSendRate() const { return _myAvatarSendRate.rate(); }
 
@@ -109,7 +120,15 @@ private:
     VectorOfMotionStates _motionStatesToRemoveFromPhysics;
 
     RateCounter<> _myAvatarSendRate;
+    int _fullySimulatedAvatars { 0 };
+    int _partiallySimulatedAvatars { 0 };
+    float _avatarSimulationTime { 0.0f };
 
+    // TODO: remove this HACK once we settle on optimal sort coefficients
+    // These coefficients exposed for fine tuning the sort priority for transfering new _jointData to the render pipeline.
+    float _avatarSortCoefficientSize { 0.5f };
+    float _avatarSortCoefficientCenter { 0.25 };
+    float _avatarSortCoefficientAge { 1.0f };
 };
 
 Q_DECLARE_METATYPE(AvatarManager::LocalLight)

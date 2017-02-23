@@ -132,18 +132,29 @@ void AvatarManager::updateMyAvatar(float deltaTime) {
 
 Q_LOGGING_CATEGORY(trace_simulation_avatar, "trace.simulation.avatar");
 
-float AvatarManager::getAvatarDataRate(const QUuid& sessionID, const QString& rateName) {
+float AvatarManager::getAvatarDataRate(const QUuid& sessionID, const QString& rateName) const {
     auto avatar = getAvatarBySessionID(sessionID);
-    return avatar->getDataRate(rateName);
+    return avatar ? avatar->getDataRate(rateName) : 0.0f;
 }
+
+float AvatarManager::getAvatarUpdateRate(const QUuid& sessionID, const QString& rateName) const {
+    auto avatar = getAvatarBySessionID(sessionID);
+    return avatar ? avatar->getUpdateRate(rateName) : 0.0f;
+}
+
+float AvatarManager::getAvatarSimulationRate(const QUuid& sessionID, const QString& rateName) const {
+    auto avatar = std::static_pointer_cast<Avatar>(getAvatarBySessionID(sessionID));
+    return avatar ? avatar->getSimulationRate(rateName) : 0.0f; 
+}
+
+
 
 class AvatarPriority {
 public:
     AvatarPriority(AvatarSharedPointer a, float p) : avatar(a), priority(p) {}
     AvatarSharedPointer avatar;
     float priority;
-    // NOTE: we invert the less-than operator to sort high priorities to front
-    bool operator<(const AvatarPriority& other) const { return priority > other.priority; }
+    bool operator<(const AvatarPriority& other) const { return priority < other.priority; }
 };
 
 void AvatarManager::updateOtherAvatars(float deltaTime) {
@@ -193,15 +204,17 @@ void AvatarManager::updateOtherAvatars(float deltaTime) {
             float distance = glm::length(offset) + 0.001f; // add 1mm to avoid divide by zero
             float radius = avatar->getBoundingRadius();
             const glm::vec3& forward = cameraView.getDirection();
-            float apparentSize = radius / distance;
-            float cosineAngle = glm::length(offset - glm::dot(offset, forward) * forward) / distance;
-            const float TIME_PENALTY = 0.080f; // seconds
-            float age = (float)(startTime - avatar->getLastRenderUpdateTime()) / (float)(USECS_PER_SECOND) - TIME_PENALTY;
+            float apparentSize = 2.0f * radius / distance;
+            float cosineAngle = glm::length(glm::dot(offset, forward) * forward) / distance;
+            float age = (float)(startTime - avatar->getLastRenderUpdateTime()) / (float)(USECS_PER_SECOND);
+
             // NOTE: we are adding values of different units to get a single measure of "priority".
-            // Thus we multiply each component by a conversion "weight" that scales its units
-            // relative to the others.  These weights are pure magic tuning and are hard coded in the
-            // relation below: (hint: unitary weights are not explicityly shown)
-            float priority = apparentSize + 0.25f * cosineAngle + age;
+            // Thus we multiply each component by a conversion "weight" that scales its units relative to the others.
+            // These weights are pure magic tuning and should be hard coded in the relation below,
+            // but are currently exposed for anyone who would like to explore fine tuning:
+            float priority = _avatarSortCoefficientSize * apparentSize
+                    + _avatarSortCoefficientCenter * cosineAngle
+                    + _avatarSortCoefficientAge * age;
 
             // decrement priority of avatars outside keyhole
             if (distance > cameraView.getCenterRadius()) {
@@ -218,6 +231,9 @@ void AvatarManager::updateOtherAvatars(float deltaTime) {
     const uint64_t MAX_UPDATE_BUDGET = 2000; // usec
     uint64_t renderExpiry = startTime + RENDER_UPDATE_BUDGET;
     uint64_t maxExpiry = startTime + MAX_UPDATE_BUDGET;
+
+    int fullySimulatedAvatars = 0;
+    int partiallySimulatedAvatars = 0;
     while (!sortedAvatars.empty()) {
         const AvatarPriority& sortData = sortedAvatars.top();
         const auto& avatar = std::static_pointer_cast<Avatar>(sortData.avatar);
@@ -246,11 +262,13 @@ void AvatarManager::updateOtherAvatars(float deltaTime) {
             avatar->simulate(deltaTime, inView);
             avatar->updateRenderItem(pendingChanges);
             avatar->setLastRenderUpdateTime(startTime);
+            fullySimulatedAvatars++;
         } else if (now < maxExpiry) {
             // we've spent most of our time budget, but we still simulate() the avatar as it if were out of view
             // --> some avatars may freeze until their priority trickles up
             const bool inView = false;
             avatar->simulate(deltaTime, inView);
+            partiallySimulatedAvatars++;
         } else {
             // we've spent ALL of our time budget --> bail on the rest of the avatar updates
             // --> some scale or fade animations may glitch
@@ -259,6 +277,10 @@ void AvatarManager::updateOtherAvatars(float deltaTime) {
         }
         sortedAvatars.pop();
     }
+
+    _avatarSimulationTime = (float)(usecTimestampNow() - startTime) / (float)USECS_PER_MSEC;
+    _fullySimulatedAvatars = fullySimulatedAvatars;
+    _partiallySimulatedAvatars = partiallySimulatedAvatars;
     qApp->getMain3DScene()->enqueuePendingChanges(pendingChanges);
 
     simulateAvatarFades(deltaTime);
@@ -492,7 +514,7 @@ void AvatarManager::updateAvatarRenderStatus(bool shouldRenderAvatars) {
 }
 
 
-AvatarSharedPointer AvatarManager::getAvatarBySessionID(const QUuid& sessionID) {
+AvatarSharedPointer AvatarManager::getAvatarBySessionID(const QUuid& sessionID) const {
     if (sessionID == AVATAR_SELF_ID || sessionID == _myAvatar->getSessionUUID()) {
         return _myAvatar;
     }
@@ -571,4 +593,30 @@ RayToAvatarIntersectionResult AvatarManager::findRayIntersection(const PickRay& 
     }
 
     return result;
+}
+
+// HACK
+float AvatarManager::getAvatarSortCoefficient(const QString& name) {
+    if (name == "size") {
+        return _avatarSortCoefficientSize;
+    } else if (name == "center") {
+        return _avatarSortCoefficientCenter;
+    } else if (name == "age") {
+        return _avatarSortCoefficientAge;
+    }
+    return 0.0f;
+}
+
+// HACK
+void AvatarManager::setAvatarSortCoefficient(const QString& name, const QScriptValue& value) {
+    if (value.isNumber()) {
+        float numericalValue = (float)value.toNumber();
+        if (name == "size") {
+            _avatarSortCoefficientSize = numericalValue;
+        } else if (name == "center") {
+            _avatarSortCoefficientCenter = numericalValue;
+        } else if (name == "age") {
+            _avatarSortCoefficientAge = numericalValue;
+        }
+    }
 }
